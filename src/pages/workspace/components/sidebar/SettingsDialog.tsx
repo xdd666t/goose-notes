@@ -351,6 +351,15 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
   const handleReset = async (zipBlob?: Blob) => {
     if (!zipBlob && !canReset) return;
+    if (zipBlob) {
+      // 在完全清除本地数据前，对所有本地非删除页面提取并记录一份覆盖前历史版本
+      const localPages = Object.values(usePages.getState().pages).filter((p) => !p.trashedAt);
+      try {
+        await Promise.all(localPages.map((page) => recordPreOverwriteHistory(page.id)));
+      } catch (err) {
+        console.error("[history] Failed to backup pre-overwrite history for all pages", err);
+      }
+    }
     dataStorage.removeItem("goose-note-notebooks");
     clearPersistedPages();
     clearLegacyStorage();
