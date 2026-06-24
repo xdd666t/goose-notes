@@ -293,6 +293,26 @@ export function useLocalFolderWatch({
     };
   }, []);
 
+  // ── 监听本地路径重复：状态异常时拒绝写盘，避免两个页面覆盖同一磁盘文件 ───────
+  useEffect(() => {
+    const handleDuplicateLocalFile = (event: Event) => {
+      const { filePath } = (event as CustomEvent).detail as {
+        pageId: string;
+        duplicatePageId: string;
+        filePath: string;
+      };
+      const fileName = filePath.replace(/^.*[\\/]/, "");
+      toast.error(`「${fileName}」保存失败`, {
+        description: "检测到另一个页面已指向同一个本地文件，请重新加载本地文件夹后再试。",
+      });
+    };
+
+    window.addEventListener("goose-note:local-file-duplicate", handleDuplicateLocalFile);
+    return () => {
+      window.removeEventListener("goose-note:local-file-duplicate", handleDuplicateLocalFile);
+    };
+  }, []);
+
   // ── 主动新鲜度检查：切页 / 切笔记本时 ──────────────────────────────────────
   // watch 只覆盖「当前笔记本目录 + 窗口存活」期间的外部修改；切页时主动 diff
   // 一次磁盘，把 watch 不在场期间的外部改动无感同步进来。

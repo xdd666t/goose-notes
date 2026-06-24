@@ -5,9 +5,14 @@ import {
   scanLocalFolderPages,
   parseLocalMarkdownContent,
   localFileTitleFromPath,
-  buildLocalPageId,
 } from "@/lib/local-folder-scanner";
 import { setLocalMdSnapshot, deleteLocalMdSnapshot } from "@/lib/local-md-snapshot";
+import {
+  readLocalPageIdMap,
+  resolveOrCreateStableId,
+  toRelativePath,
+  writeLocalPageIdMap,
+} from "@/lib/local-page-idmap";
 import { resolveHistoryBackend } from "@/lib/history/backend";
 import { localPageMetadataCache } from "../../persistence";
 import type { StoreSet, StoreGet } from "../hydrate";
@@ -343,7 +348,16 @@ export const addSingleLocalPageAction = async (
   if (!/\.(md|markdown)$/i.test(filePath)) return;
 
   const fallbackTitle = localFileTitleFromPath(filePath);
-  const pageId = buildLocalPageId(notebookId, basePath, filePath);
+  const relativePath = toRelativePath(basePath, filePath);
+  const idMap = readLocalPageIdMap(notebookId);
+  const { id: pageId, dirty } = resolveOrCreateStableId(
+    notebookId,
+    relativePath,
+    idMap,
+  );
+  if (dirty) {
+    writeLocalPageIdMap(notebookId, idMap);
+  }
 
   let markdown: string | null;
   let readError: string | undefined;

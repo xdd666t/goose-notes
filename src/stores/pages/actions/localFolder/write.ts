@@ -18,6 +18,7 @@ import {
 } from "../../folderSync";
 import type { StoreSet, StoreGet } from "../hydrate";
 import { clonePageContent, cloneLocalPageContent } from "../pageCreate";
+import { findDuplicateLocalFileOwner } from "./pathGuards";
 
 // FNV-1a 32 位哈希（含长度），用于按内容给图片附件命名以实现去重。
 function hashBase64(data: string): string {
@@ -176,6 +177,25 @@ export const saveLocalPageContentAction = async (
 
   const filePath = get().getLocalFilePath(pageId);
   if (!filePath) return false;
+
+  const duplicatePage = findDuplicateLocalFileOwner(get().pages, pageId, filePath);
+  if (duplicatePage) {
+    console.error("[local-folder] refusing to save duplicate local file path", {
+      pageId,
+      duplicatePageId: duplicatePage.id,
+      filePath,
+    });
+    window.dispatchEvent(
+      new CustomEvent("goose-note:local-file-duplicate", {
+        detail: {
+          pageId,
+          duplicatePageId: duplicatePage.id,
+          filePath,
+        },
+      }),
+    );
+    return false;
+  }
 
   const processedContent = content;
 

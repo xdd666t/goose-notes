@@ -7,6 +7,8 @@
  *   ——存量用户的收藏/置顶/lastActivePage/tabs 全部自动续命，无需迁移。
  * - 此后文件被应用内改名时，映射表更新（旧 relativePath 条目删除、新 relativePath
  *   指向同一 id），id 永不变更。
+ * - 如果旧路径后来被重新创建，而旧路径公式生成的 id 已被改名后的文件占用，
+ *   给新文件分配带后缀的新 id，避免覆盖现有页面。
  * - 外部直接重命名/删除文件时，旧 id 自然退役（扫描结束清理已消失路径的条目），可接受。
  *
  * 存储：key = `gn:local-idmap:{notebookId}`，值为 { [relativePath]: stableId }
@@ -51,6 +53,49 @@ function generateStableId(notebookId: string, relativePath: string): string {
 }
 
 /**
+ * 反查某个 stableId 当前归属的 relativePath。
+ * 用于判断「按旧路径公式生成的 id」是否已被应用内改名后的文件继续占用。
+ */
+function findRelativePathById(
+  map: LocalPageIdMap,
+  id: string,
+): string | undefined {
+  return Object.keys(map).find((key) => map[key] === id);
+}
+
+/**
+ * 为新出现的 relativePath 分配可用 stableId。
+ *
+ * 常规情况下沿用旧公式，保持存量页面 id 不变；如果旧路径被重新创建，而旧公式 id
+ * 已经归属于改名后的文件，则追加后缀生成新 id，避免覆盖现有页面。
+ */
+function generateAvailableStableId(
+  notebookId: string,
+  relativePath: string,
+  map: LocalPageIdMap,
+): string {
+  const baseId = generateStableId(notebookId, relativePath);
+  const existingRelative = findRelativePathById(map, baseId);
+  if (!existingRelative || existingRelative === relativePath) {
+    return baseId;
+  }
+
+  let suffix = 2;
+  let candidate = `${baseId}--${suffix}`;
+  const usedIds = new Set(Object.values(map));
+  while (usedIds.has(candidate)) {
+    suffix++;
+    candidate = `${baseId}--${suffix}`;
+  }
+
+  console.warn(
+    "[local-page-idmap] generated id occupied, assigning unique id",
+    { baseId, existingRelative, relativePath, candidate },
+  );
+  return candidate;
+}
+
+/**
  * 主查询/分配入口。
  *
  * 传入内存中的映射快照 `map`（调用方统一读取/写回，避免每文件各自 IO）。
@@ -67,16 +112,7 @@ export function resolveOrCreateStableId(
   if (map[relativePath]) {
     return { id: map[relativePath], dirty: false };
   }
-  const id = generateStableId(notebookId, relativePath);
-  // 防御：确保双向唯一（id 未被其他 relativePath 占用）。
-  const existingRelative = Object.keys(map).find((k) => map[k] === id);
-  if (existingRelative && existingRelative !== relativePath) {
-    // 极罕见冲突（理论上不发生，因 id 由 relativePath 确定性生成）；记录日志并复用该 id。
-    console.warn(
-      "[local-page-idmap] id collision detected",
-      { id, existingRelative, relativePath },
-    );
-  }
+  const id = generateAvailableStableId(notebookId, relativePath, map);
   map[relativePath] = id;
   return { id, dirty: true };
 }

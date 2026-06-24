@@ -1,4 +1,3 @@
-import type { Page } from "@/types";
 import { useNotebooks } from "../../../useNotebooks";
 import { useTabs } from "../../../useTabs";
 import { buildLocalPageId } from "@/lib/local-folder-scanner";
@@ -11,6 +10,11 @@ import { migrateLocalPageIdMapEntry, toRelativePath } from "@/lib/local-page-idm
 import { migratePendingLocalSave } from "../../folderSync";
 import type { StoreSet, StoreGet } from "../hydrate";
 import { cloneLocalPageContent } from "../pageCreate";
+import { markSelfMoved } from "./move";
+import {
+  findDuplicateLocalFileOwner,
+  localFilePathExists,
+} from "./pathGuards";
 
 function renameLocalPageInStore(
   set: StoreSet,
@@ -115,14 +119,19 @@ async function maybeRenameLocalFileForTitle(
   }
 
   const fs = window.gooseFs;
-  const exists = (() => {
-    try {
-      return fs.exists?.(nextFilePath) ?? false;
-    } catch {
-      return false;
-    }
-  })();
-  if (exists) {
+  const duplicatePage = findDuplicateLocalFileOwner(
+    get().pages,
+    pageId,
+    nextFilePath,
+  );
+  if (duplicatePage) {
+    console.warn(
+      "[local-title] rename skipped, target already tracked:",
+      { nextFilePath, duplicatePageId: duplicatePage.id },
+    );
+    return { pageId, collision: true };
+  }
+  if (await localFilePathExists(fs, nextFilePath)) {
     console.warn(
       "[local-title] rename skipped, target exists:",
       nextFilePath,
@@ -132,6 +141,8 @@ async function maybeRenameLocalFileForTitle(
 
   let renamed: boolean;
   try {
+    markSelfMoved(page.localFilePath.replace(/\\/g, "/"));
+    markSelfMoved(nextFilePath.replace(/\\/g, "/"));
     renamed = Boolean(
       await Promise.resolve(fs.rename(page.localFilePath, nextFilePath)),
     );
@@ -192,19 +203,19 @@ export async function renameLocalPageFileAction(
   }
 
   const fs = window.gooseFs;
-  const exists = (() => {
-    try {
-      return fs.exists?.(nextFilePath) ?? false;
-    } catch {
-      return false;
-    }
-  })();
-  if (exists) {
+  const duplicatePage = findDuplicateLocalFileOwner(
+    get().pages,
+    pageId,
+    nextFilePath,
+  );
+  if (duplicatePage || await localFilePathExists(fs, nextFilePath)) {
     throw new Error(`已存在同名文件：${sanitized}${ext}`);
   }
 
   let renamed: boolean;
   try {
+    markSelfMoved(page.localFilePath.replace(/\\/g, "/"));
+    markSelfMoved(nextFilePath.replace(/\\/g, "/"));
     renamed = Boolean(await Promise.resolve(fs.rename(page.localFilePath, nextFilePath)));
   } catch (err) {
     throw new Error(`重命名失败：${(err as Error).message ?? String(err)}`, { cause: err });

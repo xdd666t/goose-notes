@@ -60,7 +60,6 @@ import { gooseHeadingMarkSuppressExtension } from "@/components/editor/extension
 import { gooseFakeSelectionExtension } from "@/components/editor/extensions/fakeSelectionExtension";
 import { ArrowInputRuleExtension } from "@/components/editor/inputrules/arrowInputRule";
 import { gooseToggleHeadingInputRuleExtension } from "@/components/editor/inputrules/toggleHeadingInputRule";
-import { gooseInlineCodeMarkExtension } from "@/components/editor/extensions/inlineCodeMarkExtension";
 import { gooseFindInPageExtension } from "@/components/editor/find/findInPagePlugin";
 import { EditorComposer, editorSchema, getSelectedCellPlainText, getSelectedPlainTextContext, isBottomEditorBlankClick, normalizeClipboardLineEndings, shouldPreferVisibleSelectionText, stripMarkdownHardBreaks } from "./EditorComposer";
 import { isLinkworthyText } from "@/components/editor/utils/clipboard";
@@ -208,7 +207,6 @@ export const Editor = forwardRef<EditorRef, EditorProps>(function Editor({ edita
         gooseFakeSelectionExtension,
         ArrowInputRuleExtension,
         gooseToggleHeadingInputRuleExtension,
-        gooseInlineCodeMarkExtension,
         gooseFindInPageExtension,
         // 速记小窗（__GOOSE_LITE__）不挂 AI 扩展：省去 @blocknote/xl-ai + @ai-sdk（~488K）解析。
         ...(__GOOSE_LITE__
@@ -378,6 +376,27 @@ export const Editor = forwardRef<EditorRef, EditorProps>(function Editor({ edita
 
   const { handleEditorPasteCapture } = useEditorPaste({ editor, editable, shiftPressedRef });
 
+  // 冷加载时 BlockNoteView 尚未完全挂定，editor.focus() 会落到 view.dom，
+  // 但此时 contentEditable 还未稳定，焦点会「漏」到侧栏页面重命名输入框等
+  // 下一个可聚焦元素。guard：view 存在、dom 已连入文档且 doc 非空才聚焦；
+  // 否则用 rAF 延后到下一帧（挂载完成）再试，避免冷加载点编辑器丢焦点。
+  const focusEditorSafely = useCallback(() => {
+    const tryFocus = () => {
+      const view = editor.prosemirrorView;
+      const dom = view?.dom as HTMLElement | undefined;
+      if (view && dom && dom.isConnected && view.state.doc.content.size > 0) {
+        editor.focus();
+        return true;
+      }
+      return false;
+    };
+    if (!tryFocus()) {
+      requestAnimationFrame(() => {
+        tryFocus();
+      });
+    }
+  }, [editor]);
+
   const focusEditorEnd = useCallback(() => {
     const lastBlock = editor.document.at(-1);
     if (lastBlock) {
@@ -399,8 +418,8 @@ export const Editor = forwardRef<EditorRef, EditorProps>(function Editor({ edita
         editor.setTextCursorPosition(lastBlock, "end");
       }
     }
-    editor.focus();
-  }, [editor]);
+    focusEditorSafely();
+  }, [editor, focusEditorSafely]);
 
   const handleEditorBlankMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -475,35 +494,11 @@ export const Editor = forwardRef<EditorRef, EditorProps>(function Editor({ edita
     const container = editorContainerRef.current;
     if (!container) return;
 
-    // cut 时序陷阱：ProseMirror 的 cut handler 在写入 clipboardData 后会同步
-    // dispatch deleteSelection，等事件冒泡到 container（我们的 patch handler）时
-    // DOM 选区已塌缩 / CellSelection 已删除——getSelectedPlainTextContext 与
-    // getSelectedCellPlainText 都拿不到内容，patch 直接 return，markdown 软换行
-    // 残留的反斜杠 "\" 清理不掉（copy 不删选区故无此问题，于是表现为「复制干净、
-    // 剪切带 \」）。故在 capture 阶段（PM handler 之前、选区尚在时）先快照选区
-    // 上下文，bubble 阶段的 patch handler 再消费快照。
-    let cellTextSnapshot: string | null = null;
-    let selectionSnapshot: ReturnType<typeof getSelectedPlainTextContext> = null;
-
-    const snapshotSelection = () => {
-      cellTextSnapshot = getSelectedCellPlainText(editor.prosemirrorState);
-      selectionSnapshot = getSelectedPlainTextContext(container);
-    };
-
     const patchClipboardPlainText = (event: ClipboardEvent) => {
       const clipboardData = event.clipboardData;
-      const cellText = cellTextSnapshot;
-      const selectionContext = selectionSnapshot;
-      cellTextSnapshot = null;
-      selectionSnapshot = null;
       if (!clipboardData) return;
 
-      // 表格单元格选区（CellSelection）原生 DOM 选区是塌缩的，下方
-      // getSelectedPlainTextContext 会拿不到内容而放弃，落回 prosemirror-tables
-      // 默认 copy：序列化为完整 <table> HTML（含表头），转 Markdown 后带上
-      // 「名称/Key/说明」整表结构。这里优先处理 CellSelection——只取选中单元格
-      // 的纯文本（单格即单格内容，多格按行/Tab 拼接），并清空 text/html，
-      // 避免内核再写整表 HTML。
+      const cellText = getSelectedCellPlainText(editor.prosemirrorState);
       if (cellText != null) {
         event.preventDefault();
         clipboardData.setData("text/plain", cellText);
@@ -511,9 +506,20 @@ export const Editor = forwardRef<EditorRef, EditorProps>(function Editor({ edita
         return;
       }
 
+      const clipboardText = normalizeClipboardLineEndings(
+        clipboardData.getData("text/plain"),
+      );
+      // cut 时 PM 已写入剪贴板后才删选区；不拿 DOM 可见字覆盖 plain/html，
+      // 否则行内 code 会被拆成两段（复制正常、剪切异常）。只清理 markdown 软换行反斜杠。
+      const cleaned = stripMarkdownHardBreaks(clipboardText);
+      if (cleaned !== clipboardText) {
+        clipboardData.setData("text/plain", cleaned);
+        return;
+      }
+
+      const selectionContext = getSelectedPlainTextContext(container);
       if (!selectionContext) return;
 
-      const clipboardText = normalizeClipboardLineEndings(clipboardData.getData("text/plain"));
       if (
         shouldPreferVisibleSelectionText(
           clipboardText,
@@ -522,25 +528,13 @@ export const Editor = forwardRef<EditorRef, EditorProps>(function Editor({ edita
         )
       ) {
         clipboardData.setData("text/plain", selectionContext.selectedText);
-        return;
-      }
-
-      // 富文本含链接/格式时 markdown 序列化与可见文本不相等，上面不会替换；
-      // 仍需移除 markdown 软换行（hardBreak → "\<换行>"）残留的反斜杠 "\"。
-      const cleaned = stripMarkdownHardBreaks(clipboardText);
-      if (cleaned !== clipboardText) {
-        clipboardData.setData("text/plain", cleaned);
       }
     };
 
-    container.addEventListener("copy", snapshotSelection, true);
-    container.addEventListener("cut", snapshotSelection, true);
     container.addEventListener("copy", patchClipboardPlainText);
     container.addEventListener("cut", patchClipboardPlainText);
 
     return () => {
-      container.removeEventListener("copy", snapshotSelection, true);
-      container.removeEventListener("cut", snapshotSelection, true);
       container.removeEventListener("copy", patchClipboardPlainText);
       container.removeEventListener("cut", patchClipboardPlainText);
     };
@@ -643,12 +637,12 @@ export const Editor = forwardRef<EditorRef, EditorProps>(function Editor({ edita
     };
 
     const handleFocusStart = () => {
-      editor.focus();
+      focusEditorSafely();
     };
 
     const handlePluginEnter = () => {
       window.setTimeout(() => {
-        editor.focus();
+        focusEditorSafely();
       }, 0);
     };
 
